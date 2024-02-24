@@ -19,7 +19,7 @@ const client = twilio(accountSid, authToken);
 const intializeScrapper = async () => {
   try {
     const browser = await puppeteer.launch({
-      headless: false,
+      headless: true,
       // args: ['--headless'],
     });
     const page = await browser.newPage();
