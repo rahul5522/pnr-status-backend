@@ -103,9 +103,9 @@ const fillPNRDetails = async (page, pnrNo) => {
     const captchaSubmit = await page.$("#submitPnrNo");
     await captchaSubmit.click();
   } catch (err) {
+    console.log("Error ocuured while filling form", err);
     page.close();
     browser.close();
-    console.log("Error ocuured while filling form", err);
   }
 };
 
@@ -269,7 +269,7 @@ const pnrSubScriber = async ({ pnrNo, mobileNo }) => {
       await sendWhatsAppMessage(pnrDetails, mobileNo, pnrNo);
     }
 
-  } catch (err) {
+  } catch (err) {    
     throw new Error("Error from pnr subscriber");
   }
 };
@@ -292,7 +292,7 @@ export const subscribePnr = async (req, res) => {
   try {
     const { pnrNo, mobileNo, sheduleTimer } = req.body;
 
-    console.log(pnrNo, mobileNo);
+    console.log(pnrNo, mobileNo, sheduleTimer);
 
     cronJobs[pnrNo] = cron.schedule(`*/${Number(sheduleTimer) || 30} * * * *`, async () => {
       await pnrSubScriber({ pnrNo, mobileNo });
