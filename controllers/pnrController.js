@@ -8,6 +8,7 @@ import twilio from 'twilio';
 
 
 const cronJobs = {};
+const pnrStatusCache = new Map();
 
 dotenv.config()
 
@@ -218,13 +219,60 @@ const commonPnrDeatilsFetcher = async (pnrNo) => {
   }
 };
 
-const sendWhatsAppMessage = async(pnrDetails, mobileNo, pnrNo) => {
+const detectPnrChanges = (previousDetails, currentDetails) => {
+  if (!previousDetails) return { hasChanged: true, changes: { initial: true } };
 
-  try{
+  const changes = {};
+  let hasChanged = false;
 
-   console.log("Sending intilised",mobileNo);
+  // Check journey details changes
+  ['trainNumber', 'trainName', 'boardingDate', 'from', 'to', 'reservedUpto', 'boardingPoint', 'class'].forEach(field => {
+    if (previousDetails[field] !== currentDetails[field]) {
+      changes[field] = {
+        from: previousDetails[field],
+        to: currentDetails[field]
+      };
+      hasChanged = true;
+    }
+  });
 
-   const message = 
+  // Check passenger status changes
+  if (previousDetails.passengerList?.length === currentDetails.passengerList?.length) {
+    currentDetails.passengerList.forEach((passenger, index) => {
+      const prevPassenger = previousDetails.passengerList[index];
+      if (prevPassenger.currentStatus !== passenger.currentStatus ||
+          prevPassenger.bookingStatus !== passenger.bookingStatus ||
+          prevPassenger.coachPosition !== passenger.coachPosition) {
+        changes[`passenger${index + 1}`] = {
+          from: prevPassenger,
+          to: passenger
+        };
+        hasChanged = true;
+      }
+    });
+  } else {
+    changes.passengerList = {
+      from: previousDetails.passengerList,
+      to: currentDetails.passengerList
+    };
+    hasChanged = true;
+  }
+
+  // Check charting status changes
+  if (previousDetails.chartingStatus !== currentDetails.chartingStatus) {
+    changes.chartingStatus = {
+      from: previousDetails.chartingStatus,
+      to: currentDetails.chartingStatus
+    };
+    hasChanged = true;
+  }
+
+  return { hasChanged, changes };
+};
+
+
+const formatWhatsAppMessage = (pnrDetails, pnrNo, changes) => {
+  const message = 
    `🅿️PNR: ${Number(pnrNo)}
    
 🚆Train No: ${Number(pnrDetails?.trainNumber)}
@@ -246,27 +294,63 @@ const sendWhatsAppMessage = async(pnrDetails, mobileNo, pnrNo) => {
 
 🚉Train Info: https://www.goibibo.com/trains/app/trainstatus/results/?train=${Number(pnrDetails?.trainNumber)}`;
 
-  const res = await client.messages.create({
-         from: 'whatsapp:+14155238886',
-         body: message,
-         to: `whatsapp:${mobileNo}`
-       });
 
-  console.log("Message Sent successfully", res?.sid)
+  return message;
+};
+
+const sendWhatsAppMessage = async(pnrDetails, mobileNo, pnrNo, changes) => {
+  try {
+    console.log("Sending initialized", mobileNo);
+    
+    const message = formatWhatsAppMessage(pnrDetails, pnrNo, changes);
+    
+    const res = await client.messages.create({
+      from: 'whatsapp:+14155238886',
+      body: message,
+      to: `whatsapp:${mobileNo}`
+    });
+
+    console.log("Message Sent successfully", res?.sid);
     
   } catch(err) {
-    throw new Error("Error ocuurend while sending Message", err);
+    throw new Error("Error occurred while sending Message", err);
   }
-}
+};
 
 const pnrSubScriber = async ({ pnrNo, mobileNo }) => {
   try {
-    const pnrDetails = await commonPnrDeatilsFetcher(pnrNo);
+    const currentDetails = await commonPnrDeatilsFetcher(pnrNo);
     
-    console.log(pnrDetails, mobileNo);
+    if (currentDetails) {
+      const previousDetails = pnrStatusCache.get(pnrNo);
+      const { hasChanged, changes } = detectPnrChanges(previousDetails, currentDetails);
 
-    if(pnrDetails) {
-      await sendWhatsAppMessage(pnrDetails, mobileNo, pnrNo);
+      if (hasChanged) {
+        await sendWhatsAppMessage(currentDetails, mobileNo, pnrNo, changes);
+        pnrStatusCache.set(pnrNo, currentDetails);
+      } else {
+        console.log(`No changes detected for PNR: ${pnrNo}`);
+      }
+
+      // Check if chart is prepared or all tickets are confirmed
+      const isChartPrepared = currentDetails.chartingStatus.toLowerCase().includes('chart prepared');
+      const isConfirmed = currentDetails.passengerList.every(passenger => 
+        passenger.currentStatus.includes('CNF') || passenger.currentStatus.toLowerCase().includes('confirmed')
+      );
+
+      if (isChartPrepared || isConfirmed) {
+        // Unsubscribe the PNR
+        if (cronJobs[pnrNo]) {
+          cronJobs[pnrNo].stop();
+          delete cronJobs[pnrNo];
+          pnrStatusCache.delete(pnrNo);
+          console.log(`PNR ${pnrNo} unsubscribed due to ${isChartPrepared ? 'chart preparation' : 'all tickets confirmed'}.`);
+          
+          // Send a final message to inform the user
+          // const finalMessage = `Your PNR ${pnrNo} has been unsubscribed as ${isChartPrepared ? 'the chart is prepared' : 'all tickets are confirmed'}. No further updates will be sent.`;
+          // await sendWhatsAppMessage({...currentDetails, finalMessage}, mobileNo, pnrNo, changes);
+        }
+      }
     }
 
   } catch (err) {    
@@ -294,15 +378,24 @@ export const subscribePnr = async (req, res) => {
 
     console.log(pnrNo, mobileNo, sheduleTimer);
 
+    // Check if the PNR is already subscribed
+    if (cronJobs[pnrNo]) {
+      return res.status(400).json({ error: `PNR NO: ${pnrNo} is already subscribed` });
+    }
+
+    // Clear any existing cache for this PNR
+    pnrStatusCache.delete(pnrNo);
+
     cronJobs[pnrNo] = cron.schedule(`*/${Number(sheduleTimer) || 30} * * * *`, async () => {
       await pnrSubScriber({ pnrNo, mobileNo });
     });
 
-    res.status(201).json({msg: `PNR NO: ${pnrNo} subscribe successfully`})
+    // Trigger initial check
+    await pnrSubScriber({ pnrNo, mobileNo });
+
+    res.status(201).json({msg: `PNR NO: ${pnrNo} subscribed successfully`});
   } catch (err) {
-    res
-      .status(500)
-      .json({ error: "Internal Server Error While Subscribing PNR"+ err});
+    res.status(500).json({ error: "Internal Server Error While Subscribing PNR: " + err});
   }
 };
 
@@ -313,8 +406,9 @@ export const stopSubscriber = async (req, res) => {
 
   if (cronJobs[pnrNo]) {
     cronJobs[pnrNo].stop();
-    res.status(200).json( {msg: `Successfully Unsubscribe PNR NO: ${pnrNo}`});
+    pnrStatusCache.delete(pnrNo);
+    res.status(200).json({msg: `Successfully Unsubscribe PNR NO: ${pnrNo}`});
   } else {
-    res.status(404).json({ msg: `PNR NO: ${id} not found`});
+    res.status(404).json({ msg: `PNR NO: ${pnrNo} not found`});
   }
 };
