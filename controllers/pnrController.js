@@ -6,7 +6,6 @@ import cron from "node-cron";
 import isEmpty from 'lodash';
 import twilio from 'twilio';
 
-
 const cronJobs = {};
 const pnrStatusCache = new Map();
 
@@ -16,14 +15,21 @@ const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken = process.env.TWILIO_AUTH_TOKEN;
 const client = twilio(accountSid, authToken);
 
-
 const intializeScrapper = async () => {
+  let browser;
+  let page;
   try {
-    const browser = await puppeteer.launch({
+    browser = await puppeteer.launch({
       headless: true,
-      // args: ['--headless'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu'
+      ],
     });
-    const page = await browser.newPage();
+    page = await browser.newPage();
 
     await page.setViewport({ width: 1920, height: 1080 });
 
@@ -36,31 +42,28 @@ const intializeScrapper = async () => {
 
     return { page, browser };
   } catch (err) {
-    page.close();
-    browser.close();
-    console.log("Scrapper intialization failed, Error:", err);
+    if (page) await page.close();
+    if (browser) await browser.close();
+    console.log("Scrapper initialization failed, Error:", err);
+    throw err;
   }
 };
 
-const evaluateCaptcha = async (imagePath) => {
+const evaluateCaptcha = async (imagePath, page, browser) => {
   try {
     const { data } = await Tesseract.recognize(imagePath, "eng");
-
     const rawExpression = data.text;
-
     const expression = rawExpression.substring(0, rawExpression.indexOf("="));
-
-    const result = eval(expression);
-
-    return result;
+    return eval(expression);
   } catch (error) {
-    page.close();
-    browser.close();
     console.error("Error during OCR:", error.message || error);
+    if (page) await page.close();
+    if (browser) await browser.close();
+    throw error;
   }
 };
 
-const fillPNRDetails = async (page, pnrNo) => {
+const fillPNRDetails = async (page, browser, pnrNo) => {
   try {
     await page.waitForSelector("#inputPnrNo");
 
@@ -77,8 +80,7 @@ const fillPNRDetails = async (page, pnrNo) => {
     const imageElement = await page.$("#CaptchaImgID");
 
     if (!imageElement) {
-      console.error("Image element not found!");
-      return;
+      throw new Error("Image element not found!");
     }
 
     const boundingBox = await imageElement.boundingBox();
@@ -92,10 +94,17 @@ const fillPNRDetails = async (page, pnrNo) => {
       },
     });
 
+    // Ensure the directory exists
+    if (!fs.existsSync('captchaScreenshots')) {
+      fs.mkdirSync('captchaScreenshots');
+    }
+
     fs.writeFileSync("captchaScreenshots/downloaded_image1.png", screenshot);
 
     const captchaResult = await evaluateCaptcha(
-      "./captchaScreenshots/downloaded_image1.png"
+      "./captchaScreenshots/downloaded_image1.png",
+      page,
+      browser
     );
 
     const captchaResultInput = await page.$("#inputCaptcha");
@@ -104,118 +113,99 @@ const fillPNRDetails = async (page, pnrNo) => {
     const captchaSubmit = await page.$("#submitPnrNo");
     await captchaSubmit.click();
   } catch (err) {
-    console.log("Error ocuured while filling form", err);
-    page.close();
-    browser.close();
+    console.log("Error occurred while filling form", err);
+    throw err;
   }
 };
 
-const readPNRDetailsTable = async (page) => {
+const readPNRDetailsTable = async (page, browser) => {
   try {
     await page.waitForSelector("#journeyDetailsTable tbody");
 
-    const journeyDeatils = await page.$eval("#journeyDetailsTable", (table) => {
+    const journeyDetails = await page.$eval("#journeyDetailsTable", (table) => {
       const tbodyElement = table.querySelector("tbody");
+      if (!tbodyElement) throw new Error("Journey details tbody element not found");
 
-      if (tbodyElement) {
-        const rows = tbodyElement.querySelectorAll("tr");
-
-        const extractedData = Array.from(rows).map((row) => {
-          const cells = row.querySelectorAll("td");
-          return {
-            // Your hardcoded key-value pairs:
-            trainNumber: cells[0].textContent.trim(),
-            trainName: cells[1].textContent.trim(),
-            boardingDate: cells[2].textContent.trim(),
-            from: cells[3].textContent.trim(),
-            to: cells[4].textContent.trim(),
-            reservedUpto: cells[5].textContent.trim(),
-            boardingPoint: cells[6].textContent.trim(),
-            class: cells[7].textContent.trim(),
-          };
-        });
-
-        return extractedData[0];
-      } else {
-        page.close();
-        browser.close();
-        console.log("Tbody element not found.");
-      }
+      const rows = tbodyElement.querySelectorAll("tr");
+      const extractedData = Array.from(rows).map((row) => {
+        const cells = row.querySelectorAll("td");
+        return {
+          trainNumber: cells[0].textContent.trim(),
+          trainName: cells[1].textContent.trim(),
+          boardingDate: cells[2].textContent.trim(),
+          from: cells[3].textContent.trim(),
+          to: cells[4].textContent.trim(),
+          reservedUpto: cells[5].textContent.trim(),
+          boardingPoint: cells[6].textContent.trim(),
+          class: cells[7].textContent.trim(),
+        };
+      });
+      return extractedData[0];
     });
-
-    // console.log(journeyDeatils);
 
     await page.waitForSelector("#psgnDetailsTable tbody");
 
-    const passengerDeatils = await page.$eval("#psgnDetailsTable", (table) => {
+    const passengerDetails = await page.$eval("#psgnDetailsTable", (table) => {
       const tbodyElement = table.querySelector("tbody");
+      if (!tbodyElement) throw new Error("Passenger details tbody element not found");
 
-      if (tbodyElement) {
-        const rows = tbodyElement.querySelectorAll("tr");
-
-        const extractedData = Array.from(rows).map((row, i) => {
-          const cells = row.querySelectorAll("td");
-          return {
-            passengerNo: cells[0].textContent.trim(),
-            bookingStatus: cells[1].textContent.trim(),
-            currentStatus: cells[2].textContent.trim(),
-            coachPosition: cells[3].textContent.trim(),
-          };
-        });
-
-        return extractedData;
-      } else {
-        console.log("Tbody element not found.");
-      }
+      const rows = tbodyElement.querySelectorAll("tr");
+      return Array.from(rows).map((row) => {
+        const cells = row.querySelectorAll("td");
+        return {
+          passengerNo: cells[0].textContent.trim(),
+          bookingStatus: cells[1].textContent.trim(),
+          currentStatus: cells[2].textContent.trim(),
+          coachPosition: cells[3].textContent.trim(),
+        };
+      });
     });
-
-    // console.log(passengerDeatils);
 
     await page.waitForSelector("#otherDetailsTable tbody");
 
     const otherDetails = await page.$eval("#otherDetailsTable", (table) => {
       const tbodyElement = table.querySelector("tbody");
+      if (!tbodyElement) throw new Error("Other details tbody element not found");
 
-      if (tbodyElement) {
-        const rows = tbodyElement.querySelectorAll("tr");
-
-        const extractedData = Array.from(rows).map((row, i) => {
-          const cells = row.querySelectorAll("td");
-          return {
-            totalFare: cells[0].textContent.trim(),
-            chartingStatus: cells[1].textContent.trim(),
-          };
-        });
-
-        return extractedData[0];
-      } else {
-        console.log("Tbody element not found.");
-      }
+      const rows = tbodyElement.querySelectorAll("tr");
+      const extractedData = Array.from(rows).map((row) => {
+        const cells = row.querySelectorAll("td");
+        return {
+          totalFare: cells[0].textContent.trim(),
+          chartingStatus: cells[1].textContent.trim(),
+        };
+      });
+      return extractedData[0];
     });
 
-    // console.log(otherDetails);
-
     return {
-      ...journeyDeatils,
-      passengerList: passengerDeatils,
+      ...journeyDetails,
+      passengerList: passengerDetails,
       ...otherDetails,
     };
   } catch (err) {
-    console.log("Error while reading pnr Table Error:", err);
+    console.log("Error while reading PNR Table Error:", err);
+    throw err;
   }
 };
 
-const commonPnrDeatilsFetcher = async (pnrNo) => {
-  const { page, browser } = await intializeScrapper();
+const commonPnrDetailsFetcher = async (pnrNo) => {
+  let browser;
+  let page;
+  try {
+    const result = await intializeScrapper();
+    browser = result.browser;
+    page = result.page;
 
-  await fillPNRDetails(page, pnrNo);
-
-  const response = await readPNRDetailsTable(page);
-
-  if (response) {
-    page.close();
-    browser.close();
+    await fillPNRDetails(page, browser, pnrNo);
+    const response = await readPNRDetailsTable(page, browser);
     return response;
+  } catch (err) {
+    console.error("Error in commonPnrDetailsFetcher:", err);
+    throw err;
+  } finally {
+    if (page) await page.close();
+    if (browser) await browser.close();
   }
 };
 
@@ -361,16 +351,14 @@ const pnrSubScriber = async ({ pnrNo, mobileNo }) => {
 export const getPnrStatus = async (req, res) => {
   try {
     const pnrNo = req.query.pnrNo;
-
-    const response = await commonPnrDeatilsFetcher(pnrNo);
-
+    const response = await commonPnrDetailsFetcher(pnrNo);
     res.status(200).json(response);
   } catch (err) {
-    console.log({err});
-    
-    res
-      .status(500)
-      .json({ error: "Internal Server Error While Getting PNR details" });
+    console.error("Error in getPnrStatus:", err);
+    res.status(500).json({ 
+      error: "Internal Server Error While Getting PNR details",
+      details: err.message 
+    });
   }
 };
 
@@ -378,39 +366,48 @@ export const subscribePnr = async (req, res) => {
   try {
     const { pnrNo, mobileNo, sheduleTimer } = req.body;
 
-    console.log(pnrNo, mobileNo, sheduleTimer);
-
-    // Check if the PNR is already subscribed
     if (cronJobs[pnrNo]) {
       return res.status(400).json({ error: `PNR NO: ${pnrNo} is already subscribed` });
     }
 
-    // Clear any existing cache for this PNR
     pnrStatusCache.delete(pnrNo);
 
     cronJobs[pnrNo] = cron.schedule(`*/${Number(sheduleTimer) || 30} * * * *`, async () => {
-      await pnrSubScriber({ pnrNo, mobileNo });
+      try {
+        await pnrSubScriber({ pnrNo, mobileNo });
+      } catch (err) {
+        console.error(`Error in cron job for PNR ${pnrNo}:`, err);
+      }
     });
 
-    // Trigger initial check
     await pnrSubScriber({ pnrNo, mobileNo });
-
     res.status(201).json({msg: `PNR NO: ${pnrNo} subscribed successfully`});
   } catch (err) {
-    res.status(500).json({ error: "Internal Server Error While Subscribing PNR: " + err});
+    console.error("Error in subscribePnr:", err);
+    res.status(500).json({ 
+      error: "Internal Server Error While Subscribing PNR",
+      details: err.message 
+    });
   }
 };
 
 export const stopSubscriber = async (req, res) => {
-  const { pnrNo } = req.body;
+  try {
+    const { pnrNo } = req.body;
 
-  console.log({cronJobs});
-
-  if (cronJobs[pnrNo]) {
-    cronJobs[pnrNo].stop();
-    pnrStatusCache.delete(pnrNo);
-    res.status(200).json({msg: `Successfully Unsubscribe PNR NO: ${pnrNo}`});
-  } else {
-    res.status(404).json({ msg: `PNR NO: ${pnrNo} not found`});
+    if (cronJobs[pnrNo]) {
+      cronJobs[pnrNo].stop();
+      delete cronJobs[pnrNo];
+      pnrStatusCache.delete(pnrNo);
+      res.status(200).json({msg: `Successfully Unsubscribed PNR NO: ${pnrNo}`});
+    } else {
+      res.status(404).json({ msg: `PNR NO: ${pnrNo} not found`});
+    }
+  } catch (err) {
+    console.error("Error in stopSubscriber:", err);
+    res.status(500).json({ 
+      error: "Internal Server Error While Unsubscribing PNR",
+      details: err.message 
+    });
   }
 };
