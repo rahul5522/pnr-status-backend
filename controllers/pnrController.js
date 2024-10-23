@@ -366,6 +366,8 @@ export const getPnrStatus = async (req, res) => {
 
     res.status(200).json(response);
   } catch (err) {
+    console.log({err});
+    
     res
       .status(500)
       .json({ error: "Internal Server Error While Getting PNR details" });
