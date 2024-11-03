@@ -309,7 +309,7 @@ const sendWhatsAppMessage = async(pnrDetails, mobileNo, pnrNo, changes) => {
 
 const pnrSubScriber = async ({ pnrNo, mobileNo }) => {
   try {
-    const currentDetails = await commonPnrDeatilsFetcher(pnrNo);
+    const currentDetails = await commonPnrDetailsFetcher(pnrNo);    
     
     if (currentDetails) {
       const previousDetails = pnrStatusCache.get(pnrNo);
