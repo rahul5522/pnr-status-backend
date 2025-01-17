@@ -21,7 +21,7 @@ const intializeScrapper = async () => {
   try {
     browser = await puppeteer.launch({
       executablePath: '/usr/bin/chromium-browser',
-      headless: true,
+      headless: false,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
