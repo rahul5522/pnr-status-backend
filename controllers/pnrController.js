@@ -20,6 +20,7 @@ const intializeScrapper = async () => {
   let page;
   try {
     browser = await puppeteer.launch({
+      executablePath: '/usr/bin/chromium-browser',
       headless: true,
       args: [
         '--no-sandbox',
